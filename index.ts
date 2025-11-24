@@ -1,29 +1,40 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { Browser, install, getInstalledBrowsers } from '@puppeteer/browsers';
+import { Browser, install, getInstalledBrowsers, resolveBuildId, detectBrowserPlatform } from '@puppeteer/browsers';
 import * as path from 'node:path';
 import { promises as fs } from 'node:fs'; // Keep this import for file system operations
 import { Page, LaunchOptions, Browser as PuppeteerBrowser } from 'puppeteer';
 
-// Apply the stealth plugin to puppeteer
+// Apply the stealth plugin to puppeteer-extra
 puppeteer.use(StealthPlugin());
 
 async function getBrowserExecutablePath(browserType: string): Promise<string> {
-    const desiredBrowser = browserType === 'edge' ? Browser.CHROME : Browser.CHROME; // @puppeteer/browsers uses CHROME for Edge
+    // Determine the correct browser type for @puppeteer/browsers
+    const desiredBrowser = browserType === 'firefox' ? Browser.FIREFOX : Browser.CHROME;
     const cacheDir = path.join(__dirname, '.browser-cache');
     
-    // Check if the browser is already installed by puppeteer
+    // Check if the browser is already installed by our script
     const installedBrowsers = await getInstalledBrowsers({ cacheDir });
-    const installedBrowser = installedBrowsers.find(b => b.browser === desiredBrowser);
+    // Find a browser of the desired type that has a valid executable path
+    const installedBrowser = installedBrowsers.find(b => b.browser === desiredBrowser && b.executablePath);
 
     if (installedBrowser) {
-        console.log(`${browserType} is already installed at ${installedBrowser.path}`);
         return installedBrowser.executablePath;
     }
 
-    console.log(`Downloading ${browserType}... This might take a moment.`);
-    const newBrowser = await install({ browser: desiredBrowser, buildId: '126.0.6478.126', cacheDir });
-    console.log(`${browserType} downloaded successfully to ${newBrowser.path}`);
+    console.log(`Downloading a compatible browser... This is a one-time setup per environment.`);
+    
+    // For Firefox, resolve the latest available build ID. For Chrome, use a known-good one.
+    const platform = detectBrowserPlatform();
+    if (!platform) {
+        throw new Error('Could not detect browser platform.');
+    }
+
+    const buildId = desiredBrowser === Browser.FIREFOX 
+        ? await resolveBuildId(Browser.FIREFOX, platform, 'latest') 
+        : '126.0.6478.126';
+
+    const newBrowser = await install({ browser: desiredBrowser, buildId, cacheDir });
     return newBrowser.executablePath;
 }
 
@@ -42,29 +53,31 @@ async function getBrowserExecutablePath(browserType: string): Promise<string> {
 
         const launchOptions: LaunchOptions = {
             headless: "shell",
-            args: ['--disable-web-security', '--no-sandbox', '--disable-setuid-sandbox'],
+            args: [
+                '--disable-web-security', 
+                '--no-sandbox', 
+                '--disable-setuid-sandbox',
+                '--dns-server=8.8.8.8' // Use Google's public DNS server
+            ],
         };
-        let executablePath: string | undefined = undefined;
 
         switch (browserType) {
             case 'firefox':
-                (launchOptions as any).product = 'firefox'; // Cast to any to allow product property
-                // Firefox doesn't support headless: "shell", so we use the new headless mode.
-                // Also remove Chrome-specific '--disable-setuid-sandbox' argument.
-                launchOptions.headless = true; // Use boolean true for the new headless mode in Firefox
-                launchOptions.args = ['--disable-web-security', '--no-sandbox'];
-                break;
-            case 'edge': // Fallthrough to default is intentional
-            default: // 'chrome'
-                executablePath = await getBrowserExecutablePath(browserType);
+            case 'edge': // Fallthrough is intentional as both use Chromium
+            case 'chrome':
+            default:
+                // This guarantees a browser is available, making the script portable.
+                const executablePath = await getBrowserExecutablePath(browserType);                
+                browser = await puppeteer.launch({ ...launchOptions, executablePath });
                 break;
         }
-
-        browser = await puppeteer.launch({ ...launchOptions, executablePath });
         const page: Page = await (browser as any).newPage(); // Cast to any to access newPage
 
         console.log('Navigating to RBI homepage to simulate human behavior...');
-        await page.goto('https://www.rbi.org.in/', { waitUntil: 'networkidle0' });
+        await page.goto('https://www.rbi.org.in/', { 
+            waitUntil: 'domcontentloaded', // Wait for the main document to load, not all resources
+            timeout: 60000 // Increase timeout to 60 seconds for more resilience
+        });
 
         console.log(`Fetching PDF content from ${pdfUrl}...`);
 
